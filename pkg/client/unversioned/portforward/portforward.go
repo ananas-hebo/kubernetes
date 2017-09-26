@@ -39,6 +39,8 @@ type PortForwarder struct {
 	ports    []ForwardedPort
 	stopChan <-chan struct{}
 
+	addresses []listenAddress
+
 	dialer        httpstream.Dialer
 	streamConn    httpstream.Connection
 	listeners     []io.Closer
@@ -107,8 +109,68 @@ func parsePorts(ports []string) ([]ForwardedPort, error) {
 	return forwards, nil
 }
 
+type listenAddress struct {
+	address  string
+	protocol string
+}
+
+func parseAddresses(addressesToParse []string) ([]listenAddress, error) {
+	var addresses []listenAddress
+	var al []string
+	// replace non IP entries with their resolved addresses or remove completely
+	// "localhost" will get replaced with 127.0.0.1 and ::1
+	for _, addr := range addressesToParse {
+		if addr == "localhost" {
+			al = append(al, "127.0.0.1")
+			al = append(al, "::1")
+		} else if net.ParseIP(addr) != nil {
+			al = append(al, addr)
+		} else {
+			var hosts []string
+			hosts, err := net.LookupHost(addr)
+			if err != nil {
+				return nil, fmt.Errorf("%s can not be parsed into valid listen address", addr)
+			}
+			al = append(al, hosts...)
+		}
+	}
+	addressesToParse = al
+	// assemble and return []listenAddress to listen on
+	for _, address := range addressesToParse {
+		var parsed listenAddress
+		var found bool
+		if net.ParseIP(address).To4() != nil {
+			parsed = listenAddress{address: address, protocol: "tcp4"}
+		} else if net.ParseIP(address) != nil {
+			parsed = listenAddress{address: address, protocol: "tcp6"}
+		}
+		// append only unique entries
+		found = false
+		for _, a := range addresses {
+			if a.address == parsed.address && a.protocol == parsed.protocol {
+				found = true
+			}
+		}
+		if found != true {
+			addresses = append(addresses, parsed)
+		}
+	}
+	return addresses, nil
+}
+
 // New creates a new PortForwarder.
 func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
+	return NewOnAddresses(dialer, []string{"localhost"}, ports, stopChan, readyChan, out, errOut)
+}
+
+func NewOnAddresses(dialer httpstream.Dialer, addresses []string, ports []string, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
+	if len(addresses) == 0 {
+		return nil, errors.New("You must specify at least 1 address")
+	}
+	parsedAddresses, err := parseAddresses(addresses)
+	if err != nil {
+		return nil, err
+	}
 	if len(ports) == 0 {
 		return nil, errors.New("You must specify at least 1 port")
 	}
@@ -117,14 +179,34 @@ func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, rea
 		return nil, err
 	}
 	return &PortForwarder{
-		dialer:   dialer,
-		ports:    parsedPorts,
-		stopChan: stopChan,
-		Ready:    readyChan,
-		out:      out,
-		errOut:   errOut,
+		dialer:    dialer,
+		addresses: parsedAddresses,
+		ports:     parsedPorts,
+		stopChan:  stopChan,
+		Ready:     readyChan,
+		out:       out,
+		errOut:    errOut,
 	}, nil
 }
+
+// New creates a new PortForwarder.
+//func New(dialer httpstream.Dialer, ports []string, stopChan <-chan struct{}, readyChan chan struct{}, out, errOut io.Writer) (*PortForwarder, error) {
+//	if len(ports) == 0 {
+//		return nil, errors.New("You must specify at least 1 port")
+//	}
+//	parsedPorts, err := parsePorts(ports)
+//	if err != nil {
+//		return nil, err
+//	}
+//	return &PortForwarder{
+//		dialer:   dialer,
+//		ports:    parsedPorts,
+//		stopChan: stopChan,
+//		Ready:    readyChan,
+//		out:      out,
+//		errOut:   errOut,
+//	}, nil
+//}
 
 // ForwardPorts formats and executes a port forwarding request. The connection will remain
 // open until stopChan is closed.
@@ -181,17 +263,19 @@ func (pf *PortForwarder) forward() error {
 // listenOnPort delegates tcp4 and tcp6 listener creation and waits for connections on both of these addresses.
 // If both listener creation fail, an error is raised.
 func (pf *PortForwarder) listenOnPort(port *ForwardedPort) error {
-	//	errTcp4 := pf.listenOnPortAndAddress(port, "tcp4", "127.0.0.1")
-	//	errTcp6 := pf.listenOnPortAndAddress(port, "tcp6", "[::1]")
-	//	if errTcp4 != nil && errTcp6 != nil {
-	//		return fmt.Errorf("All listeners failed to create with the following errors: %s, %s", errTcp4, errTcp6)
-	//	}
-
-	errTcp4 := pf.listenOnPortAndAddress(port, "tcp4", "10.0.7.141")
-	if errTcp4 != nil {
-		return fmt.Errorf("All listeners failed to create with the following errors: %s", errTcp4)
+	var listenSuccessfull bool
+	var errors []error
+	for _, addr := range pf.addresses {
+		err := pf.listenOnPortAndAddress(port, addr.protocol, addr.address)
+		if err != nil {
+			errors = append(errors, err)
+		} else {
+			listenSuccessfull = true
+		}
 	}
-
+	if listenSuccessfull != true {
+		return fmt.Errorf("%s: %v", "All listeners failed to create with the following errors", errors)
+	}
 	return nil
 }
 
@@ -220,6 +304,7 @@ func (pf *PortForwarder) getListener(protocol string, hostname string, port *For
 	localPortUInt, err := strconv.ParseUint(localPort, 10, 16)
 
 	if err != nil {
+		fmt.Fprintf(pf.out, "Failed to forward from %s:%d -> %d\n", hostname, localPortUInt, port.Remote)
 		return nil, fmt.Errorf("Error parsing local port: %s from %s (%s)", err, listenerAddress, host)
 	}
 	port.Local = uint16(localPortUInt)

@@ -41,6 +41,7 @@ type PortForwardOptions struct {
 	RESTClient    *restclient.RESTClient
 	Config        *restclient.Config
 	PodClient     coreclient.PodsGetter
+	Address       []string
 	Ports         []string
 	PortForwarder portForwarder
 	StopChannel   chan struct{}
@@ -55,11 +56,14 @@ var (
 		# Listen on port 8888 locally, forwarding to 5000 in the pod
 		kubectl port-forward mypod 8888:5000
 
-		# Listen on a random port locally, forwarding to 5000 in the pod
-		kubectl port-forward mypod :5000
+		# Listen on port 8888 on all addresses, forwarding to 5000 in the pod
+		kubectl port-forward --address 0.0.0.0 mypod 8888:5000
+
+		# Listen on port 8888 on localhost and selected IP, forwarding to 5000 in the pod
+		kubectl port-forward --address localhost,10.19.21.23,example.com mypod 8888:5000		
 
 		# Listen on a random port locally, forwarding to 5000 in the pod
-		kubectl port-forward  mypod 0:5000`)
+		kubectl port-forward mypod :5000`)
 )
 
 func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Command {
@@ -70,7 +74,7 @@ func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Comma
 		},
 	}
 	cmd := &cobra.Command{
-		Use:     "port-forward POD [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
+		Use:     "port-forward POD [options] [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
 		Short:   "Forward one or more local ports to a pod",
 		Long:    "Forward one or more local ports to a pod.",
 		Example: portforward_example,
@@ -87,6 +91,7 @@ func NewCmdPortForward(f cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Comma
 		},
 	}
 	cmd.Flags().StringP("pod", "p", "", "Pod name")
+	cmd.Flags().StringSlice("address", []string{"localhost"}, "Addresses to listen on (comma separated)")
 	// TODO support UID
 	return cmd
 }
@@ -104,7 +109,7 @@ func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts Po
 	if err != nil {
 		return err
 	}
-	fw, err := portforward.New(dialer, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
+	fw, err := portforward.NewOnAddresses(dialer, opts.Address, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
 	if err != nil {
 		return err
 	}
@@ -146,6 +151,8 @@ func (o *PortForwardOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 	if err != nil {
 		return err
 	}
+
+	o.Address = cmdutil.GetFlagStringSlice(cmd, "address")
 
 	o.StopChannel = make(chan struct{}, 1)
 	o.ReadyChannel = make(chan struct{})

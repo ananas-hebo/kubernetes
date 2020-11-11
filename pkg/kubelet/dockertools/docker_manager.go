@@ -1087,9 +1087,9 @@ func (dm *DockerManager) Version() (kubecontainer.Version, error) {
 		return nil, fmt.Errorf("docker: failed to get docker version: %v", err)
 	}
 	version, err := newDockerVersion(v.Version)
-	if err != nil {
-		return nil, fmt.Errorf("docker: failed to parse docker version %q: %v", v.Version, err)
-	}
+	//if err != nil {
+	//	return nil, fmt.Errorf("docker: failed to parse docker version %q: %v", v.Version, err)
+	//}
 	return version, nil
 }
 
